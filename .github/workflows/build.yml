@@ -1,0 +1,67 @@
+name: Build Uncertain Master
+
+# Se declenche automatiquement des que tu deposes/modifies des fichiers,
+# et peut aussi etre lance a la main (onglet Actions -> Run workflow).
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure (version complete, VST3 uniquement)
+        run: cmake -B build -A x64 -DUM_TRIAL=OFF -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Creer l'installeur (.exe)
+        shell: pwsh
+        run: |
+          $vst3 = Get-ChildItem -Path "build" -Recurse -Directory -Filter "*.vst3" | Select-Object -First 1
+          if (-not $vst3) { Write-Error "VST3 bundle introuvable"; exit 1 }
+          Write-Host "VST3 trouve : $($vst3.FullName)"
+
+          $iscc = Get-ChildItem -Path "C:\Program Files (x86)", "C:\Program Files" -Recurse -Filter "ISCC.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $iscc) {
+            choco install innosetup -y --no-progress
+            $iscc = Get-ChildItem -Path "C:\Program Files (x86)", "C:\Program Files" -Recurse -Filter "ISCC.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          }
+          Write-Host "ISCC : $($iscc.FullName)"
+
+          New-Item -ItemType Directory -Force -Path "installer-out" | Out-Null
+          & $iscc.FullName `
+            "/DAppName=Uncertain Master" `
+            "/DAppVersion=3.0.0" `
+            "/DSrcDir=$($vst3.FullName)" `
+            "/DOutName=UncertainMaster-Installeur" `
+            "/DOutDir=$PWD\installer-out" `
+            installer.iss
+
+      # >>> C'EST CE FICHIER QUE TU TELECHARGES : l'installeur .exe <<<
+      - name: Upload installeur .exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: UncertainMaster-Installeur-EXE
+          path: installer-out/*.exe
+
+      # Secours : le .vst3 brut (a copier a la main dans le dossier VST3)
+      - name: Upload VST3 brut (secours)
+        uses: actions/upload-artifact@v4
+        with:
+          name: UncertainMaster-VST3-brut
+          path: build/**/*.vst3
+
+      - name: Logs si echec
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: LOGS-si-echec
+          path: |
+            build/**/*.log
+            build/CMakeCache.txt
