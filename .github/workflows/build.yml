@@ -1,0 +1,93 @@
+name: Build Uncertain Master
+
+# Se declenche tout seul a chaque depot/modif, ou a la main (Actions > Run workflow).
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Montre ce qui a ete reellement depose (utile en cas de souci)
+      - name: Voir l'arborescence du repo
+        shell: pwsh
+        run: Get-ChildItem -Recurse -File | Select-Object FullName
+
+      # Trouve CMakeLists.txt OU QU'IL SOIT (racine ou sous-dossier).
+      # Plus besoin que le depot soit parfait : le build s'adapte.
+      - name: Localiser le projet
+        id: find
+        shell: pwsh
+        run: |
+          $cml = Get-ChildItem -Recurse -Filter CMakeLists.txt |
+                 Where-Object { (Get-Content $_.FullName -Raw) -match 'UncertainMaster' } |
+                 Select-Object -First 1
+          if (-not $cml) {
+            Write-Host "::error::CMakeLists.txt du projet introuvable. Verifie que les fichiers Source + CMakeLists.txt + installer.iss sont bien dans le repo."
+            exit 1
+          }
+          $dir = $cml.Directory.FullName
+          Write-Host "Projet trouve dans : $dir"
+          "projdir=$dir" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Configure (version complete, VST3 uniquement)
+        run: cmake -S "${{ steps.find.outputs.projdir }}" -B build -A x64 -DUM_TRIAL=OFF -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Creer l'installeur (.exe)
+        shell: pwsh
+        run: |
+          $vst3 = Get-ChildItem -Path "build" -Recurse -Directory -Filter "*.vst3" | Select-Object -First 1
+          if (-not $vst3) { Write-Error "VST3 bundle introuvable apres build"; exit 1 }
+          Write-Host "VST3 : $($vst3.FullName)"
+
+          $iss = Get-ChildItem -Recurse -Filter installer.iss | Select-Object -First 1
+          if (-not $iss) { Write-Error "installer.iss introuvable"; exit 1 }
+
+          $iscc = Get-ChildItem -Path "C:\Program Files (x86)", "C:\Program Files" -Recurse -Filter "ISCC.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $iscc) {
+            choco install innosetup -y --no-progress
+            $iscc = Get-ChildItem -Path "C:\Program Files (x86)", "C:\Program Files" -Recurse -Filter "ISCC.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          }
+          Write-Host "ISCC : $($iscc.FullName)"
+
+          New-Item -ItemType Directory -Force -Path "installer-out" | Out-Null
+          & $iscc.FullName `
+            "/DAppName=Uncertain Master" `
+            "/DAppVersion=3.0.0" `
+            "/DSrcDir=$($vst3.FullName)" `
+            "/DOutName=UncertainMaster-Installeur" `
+            "/DOutDir=$PWD\installer-out" `
+            $iss.FullName
+
+      - name: Upload installeur .exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: UncertainMaster-Installeur-EXE
+          path: installer-out/*.exe
+          if-no-files-found: warn
+
+      - name: Upload VST3 brut (secours)
+        uses: actions/upload-artifact@v4
+        with:
+          name: UncertainMaster-VST3-brut
+          path: build/**/*.vst3
+          if-no-files-found: ignore
+
+      - name: Logs si echec
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: LOGS-si-echec
+          path: |
+            build/**/*.log
+            build/**/CMakeCache.txt
+            build/**/CMakeError.log
+          if-no-files-found: ignore
